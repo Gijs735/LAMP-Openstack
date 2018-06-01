@@ -1,0 +1,172 @@
+- name: Create OpenStack Cloud Environment
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    GATEWAY_NET: vlan1288
+  tasks:
+
+    - name: Create the network
+      os_network:
+        state: present
+        name: network
+        external: false
+        shared: false
+        verify: false
+
+    - name: Create the subnet
+      os_subnet:
+        state: present
+        network_name: network
+        name: subnet
+        ip_version: 4
+        cidr: 192.168.0.0/24
+        gateway_ip: 192.168.0.1
+        enable_dhcp: yes
+        dns_nameservers:
+          - 10.50.40.100
+          - 10.50.40.101
+        verify: false
+
+    - name: Create the test router
+      os_router:
+        state: present
+        name: router
+        network: "{{ GATEWAY_NET }}"
+        interfaces:
+        - subnet
+        verify: false
+
+- name: Launch instance on OpenStack
+  hosts: localhost
+  gather_facts: false
+  vars:
+    webserver_count: 1
+    IMAGE_NAME: Ubuntu Xenial 16.04
+    sec_key_name: demokey
+    sec_privkey_destination: ~/demokey.pem
+    FLAVOR_NAME: m1.lesstiny
+
+  tasks:
+
+    - name: Create ansible security group
+      os_security_group:
+        state: present
+        name: ansible
+        verify: false
+
+    - name: Create rule to allow SSH connections
+      os_security_group_rule:
+        security_group: ansible
+        protocol: tcp
+        port_range_min: 22
+        port_range_max: 22
+        remote_ip_prefix: 0.0.0.0/0
+        verify: false
+
+    - name: Create webserver security group
+      os_security_group:
+        state: present
+        name: webserver
+        verify: false
+
+    - name: Create rule to allow http connections
+      os_security_group_rule:
+        security_group: webserver
+        protocol: tcp
+        port_range_min: 80
+        port_range_max: 80
+        remote_ip_prefix: 0.0.0.0/0
+        verify: false
+    - name: Create keypair
+      os_keypair:
+        state: present
+        name: "{{ sec_key_name }}"
+      register: keypair
+
+    - name: Export private_key
+      copy: 
+        content: "{{ keypair['key']['private_key'] }}"
+        dest: "{{ sec_privkey_destination }}"
+        mode: 0400
+      when: keypair.changed
+
+    - name: Deploy Webserver Instance
+      os_server:
+        state: present
+        name: lamp{{ item }}
+        image: "{{ IMAGE_NAME}}"
+        key_name: "{{ sec_key_name }}"
+        timeout: 200
+        flavor: "{{ FLAVOR_NAME }}"
+        network: network
+        security_groups: default,ansible,webserver
+        verify: false
+        userdata: |
+          {%- raw -%}#!/bin/bash
+          echo "Installing Python"
+          apt install -y python python-minimal
+          #dhclient ens4
+          #DHclient is only needed for the second network interface in step 2 PE, not needed here.
+          {% endraw %}
+      register: nova_webservers
+
+      with_sequence:
+        count={{ webserver_count }}
+
+    - name: Add webservers to Inventory
+      add_host: 
+        name: "{{ item.server.name }}" 
+        groups: webservers 
+        ansible_ssh_host: "{{ item.server.accessIPv4 }}"
+        ansible_ssh_private_key_file: "{{ sec_privkey_destination }}"
+      with_items: "{{ nova_webservers.results }}"
+
+- name: Wait for port 22 to be ready
+  hosts: webservers
+  gather_facts: False
+  tasks:
+    - local_action:
+        module: wait_for port=22 host={{ ansible_ssh_host }} search_regex=OpenSSH delay=10
+
+- name: Configure Web Server
+  hosts: webservers
+  remote_user: ubuntu
+  become: true
+  gather_facts: False
+
+  tasks:
+    - name: Ensure Apache is installed
+      apt: name=apache2 state=latest
+    - name: Ensure that Apache is started
+      service: name=apache2 state=started enabled=yes
+    - name: Install the php packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - php7.0
+        - libapache2-mod-php7.0
+        - php7.0-cli
+        - php7.0-common
+        - php7.0-mbstring
+        - php7.0-gd
+        - php7.0-intl
+        - php7.0-xml
+        - php7.0-mysql
+        - php7.0-mcrypt
+        - php7.0-zip
+      become: true
+    - name: Copy index file
+      template:
+        src: index.cfg.jn2
+        dest: /var/www/html/index.php
+        owner: root
+        group: root
+        mode: 0644
+        backup: yes
+      become: true
+    - name: Delete default html file
+      file:
+        state: absent
+        path: "/var/www/html/index.html"
