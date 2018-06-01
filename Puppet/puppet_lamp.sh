@@ -116,12 +116,3 @@ EOF
 ssh -i ~/.ssh/id_rsa.pub ubuntu@$CC_PUBLIC_IP 'bash -s' < /tmp/puppetinstall.sh
 scp -i ~/.ssh/id_rsa.pub '/tmp/lamp.pp' ubuntu@$CC_PUBLIC_IP:~
 ssh -i ~/.ssh/id_rsa.pub ubuntu@$CC_PUBLIC_IP "echo 'sudo /opt/puppetlabs/bin/puppet apply lamp.pp' | sudo bash"
-
-
-
-
-
-
-
-
-
